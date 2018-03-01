@@ -40,10 +40,7 @@ Postdata:
  throw a error and rollback.
  
  Is up to you to check that all included relations relay on the same datasource, if a relation is in another datasource
- and error will occour and you will enter in a unknown dimension, the same can happen if you have attached hooks on the
+ and error will occour and you will enter in a unknown dimension. If you have attached hooks on the
  relation models or the base model itself, if you create an hook "on create" in the client model and in the logic of the 
- hook you create a record in another model like says Tasks, if the transaction fails you will end up with a Tasks result 
- which won't rollback, i don't know how loopback handle this situations currently i ran of time to check it in more deply
- so this is just a warn.
+ hook you create a record in another model like says Tasks, then make sure at the moment of Task creation to include in the options the Transaction which is included in context.options.transaction so in case of a failure Task will be too rolledback.
  
-
