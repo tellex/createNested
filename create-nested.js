@@ -55,12 +55,12 @@ createNested.prototype.create = function(data,options,masterCB){
                 else{ masterCB(null,recordedData);}})
             }})
           }else if(Object.prototype.toString.call(blocks) == "[object Function]"){
-            blocks().then(function(recordedData){
+              blocks().then(function(recordedData){
               tx.commit(function(commitError){
                 if(commitError){ masterCB(commitError); }
                 else{ masterCB(null,recordedData); }})
               }).catch(function(error){
-                tx.rollback(function(rollbackError){
+              tx.rollback(function(rollbackError){
                   if(rollbackError){ masterCB(rollbackError); }
                   else{ masterCB(error); }});
               })
@@ -73,21 +73,23 @@ createNested.prototype.getRelations = function(relations){
   relationData = {}
   for(var relation in relations){
       tmp = {};
-      tmp.name  = relations[relation].name;
-      tmp.modelTo = relations[relation].modelTo.definition.name;
+      tmp.name         = relations[relation].name;
+      tmp.modelTo      = relations[relation].modelTo.definition.name;
       tmp.modelToTable = this.connector.schema(tmp.modelTo)+"."+this.datasource.connector.table(tmp.modelTo);
+      tmp.modelToProps = relations[relation].modelTo.definition.properties;
       tmp.keyTo = relations[relation].keyTo;
-      tmp.modelToProperties = relations[relation].modelTo.definition.properties;
-      tmp.modelFrom = relations[relation].modelFrom.definition.name;
+      tmp.modelFrom      = relations[relation].modelFrom.definition.name;
       tmp.modelFromTable = this.connector.schema(tmp.modelFrom)+"."+this.datasource.connector.table(tmp.modelFrom);
+      tmp.modelFromProps = relations[relation].modelFrom.definition.properties;
       tmp.keyFrom = relations[relation].keyFrom;
-      if((relations[relation].type == "hasMany" && typeof relations[relation].modelThrough == 'undefined')
+      if((relations[relation].type == "hasMany" && relations[relation].modelThrough == undefined)
         || relations[relation].type == "belongsTo" || relations[relation].type == "hasOne" ){
         tmp.type = relations[relation].type;
       }
       if(relations[relation].type == "hasMany" && typeof relations[relation].modelThrough != 'undefined'){
-        tmp.type = "hasManyThrough";
-        tmp.modelThrough = relations[relation].modelThrough.definition.name;
+        tmp.type               = "hasManyThrough";
+        tmp.modelThrough       = relations[relation].modelThrough.definition.name;
+        tmp.modelThroughProps  = relations[relation].modelThrough.definition.properties;
         tmp.modelThroughTable  = this.datasource.connector.schema(tmp.modelThrough)+"."+this.datasource.connector.table(tmp.modelThrough);
         tmp.keyThrough = relations[relation].keyThrough;
       }
@@ -97,13 +99,15 @@ createNested.prototype.getRelations = function(relations){
   return relationData;
 }
 
-createNested.prototype.makeRootFunc = function(data,model,modelName,relationName,tx,accessToken){
+createNested.prototype.makeRootFunc = function(data,model,modelName,relationName,relationType,relationData,tx,accessToken){
   return function(parentModel = false){
         var tmpModel = null;
         if(parentModel == false ){
           tmpModel = new model(data);
         }else{
-          tmpModel = parentModel[relationName].build(data);
+          if(relationType != 'hasManyThrough' || (relationType == 'hasManyThrough' && Object.prototype.toString.call(data) == "[object Object]")){
+             tmpModel = parentModel[relationName].build(data);
+          }
         }
         var createMethod = null;
         for(let method of model.sharedClass._methods){
@@ -117,9 +121,70 @@ createNested.prototype.makeRootFunc = function(data,model,modelName,relationName
               if(error){ reject(error);}
               else{
                 if(!status){ reject("Access to method "+modelName+".create() is not allowed"); }
-                else{ model.create(tmpModel,{transaction:tx,validate:true},function(error,data){
-                      if(error){ reject(error) }
-                      else{ resolve(data)}});}
+                else{
+                  if(relationType == 'hasManyThrough'){
+                    var method        = null;
+                    var keyThrough    = null;
+                    var keyThroughVal = null;
+                    var keyTo         = null;
+                    var keyToVal      = null;
+                    var aditionalData = {};
+                    var dataType = Object.prototype.toString.call(data);
+                    switch(dataType){
+                      case "[object Object]":
+                          keyThrough = relationData['keyThrough'];
+                          if(data[keyThrough] != undefined){
+                            method            = 'add';
+                            keyThroughVal     = data[keyThrough];
+                            var modelThroughProps = relationData['modelThroughProps'];
+                            for(var prop in data){
+                                if(modelThroughProps[prop] != undefined && prop != keyThrough && prop != keyTo){
+                                  aditionalData[prop] = data[prop];
+                                }
+                            }
+                          }else{
+                            method = 'create';
+                          }
+                          break;
+                      case "[object String]":
+                      case "[object Number]":
+                          method = 'add';
+                          keyThroughVal = data;
+                          break;
+                    }
+
+                    switch(method){
+                      case 'add':
+                          parentModel[relationName].add(keyThroughVal,aditionalData,{transaction:tx,validate:true},function(error,data){
+                              if(error){
+                                 reject(error)
+                              }
+                              else{
+                                 resolve(data)
+                              }
+                          });
+                          break;
+                      case 'create':
+                          parentModel[relationName].create(data,{transaction:tx,validate:true},function(error,data){
+                              if(error){
+                                  reject(error)
+                              }
+                              else{
+                                  resolve(data)
+                              }
+                          });
+                    }
+                  }else{
+                    model.create(tmpModel,{transaction:tx,validate:true},function(error,data){
+                      if(error){
+                        reject(error)
+                      }
+                      else{
+                        resolve(data)
+                      }
+                    });
+                  }
+                }
               }
           });
         })
@@ -131,9 +196,10 @@ createNested.prototype.makeLeafFuncs = function(data,relationData,tx,accessToken
   var leafFuncs = [];
   for(var property in data){
     if(typeof relationData[property] != 'undefined'){
-      var leaf_rel_name = property;
-      var leaf_model_name = relationData[leaf_rel_name].modelTo;
-      var leaf_rel_type   = relationData[leaf_rel_name].type;
+      var leaf_rel_name   = property;
+      var leaf_rel_data   = relationData[leaf_rel_name];
+      var leaf_model_name = leaf_rel_data.modelTo;
+      var leaf_rel_type   = leaf_rel_data.type;
       var leaf_data       = data[property];
       var type = Object.prototype.toString.call(leaf_data);
       switch(leaf_rel_type){
@@ -141,6 +207,7 @@ createNested.prototype.makeLeafFuncs = function(data,relationData,tx,accessToken
             if(type == "[object Array]"){ leaf_data = leaf_data[0]; }
             else if(type != "[object Object]") continue;
             break;
+        case 'hasManyThrough':
         case 'hasMany':
             if(!(type == "[object Object]" || type == "[object Array]")){
               continue;
@@ -148,7 +215,9 @@ createNested.prototype.makeLeafFuncs = function(data,relationData,tx,accessToken
             break;
       }
       var leafFunc = function(){
-        return {rel_type:leaf_rel_type,rel_name:leaf_rel_name,funcs:self.processData(leaf_data,tx,accessToken,leaf_model_name,leaf_rel_name)};
+        return { rel_type:leaf_rel_type,
+                 rel_name:leaf_rel_name,
+                    funcs:self.processData(leaf_data,tx,accessToken,leaf_model_name,leaf_rel_name,leaf_rel_type,leaf_rel_data)};
       }
         leafFuncs.push(leafFunc);
       }
@@ -177,6 +246,7 @@ createNested.prototype.makeMasterFunc = function(rootFunc,leafFuncs){
                     parentCB(err);
                   });
                   break;
+                case 'hasManyThrough':
                 case 'hasMany':
                   recordedData[rel_name] = [];
                   if(endFuncsType == "[object Function]"){
@@ -221,18 +291,16 @@ createNested.prototype.makeMasterFunc = function(rootFunc,leafFuncs){
   return master_func;
 }
 
-createNested.prototype.processData = function(data,tx,accessToken,modelName = this.modelName,relationName = false){
+createNested.prototype.processData = function(data,tx,accessToken,modelName = this.modelName,relationName = false,relationType = false,parent_rel_data = false){
   var self = this;
   var model        = Model.app.models[modelName];
-  var connector    = Model.getDataSource().connector;
-  var properties   = connector.getModelDefinition(modelName).properties;
   var relationData = this.getRelations(model.relations);
-  var master_func = [];
+  var master_func  = [];
   var master_funcs = [];
   if(Object.prototype.toString.call(data) == '[object Array]'){
     data.forEach(function(subdata){
       var leafFuncs   = [];
-      var rootFunc    = self.makeRootFunc(subdata,model,modelName,relationName,tx,accessToken);
+      var rootFunc    = self.makeRootFunc(subdata,model,modelName,relationName,relationType,parent_rel_data,tx,accessToken);
       var leafFuncs   = self.makeLeafFuncs(subdata,relationData,tx,accessToken);
       var master_func = self.makeMasterFunc(rootFunc,leafFuncs);
       master_funcs.push(master_func);
@@ -240,12 +308,11 @@ createNested.prototype.processData = function(data,tx,accessToken,modelName = th
   }
   else if(Object.prototype.toString.call(data) == '[object Object]'){
     var leafFuncs    = [];
-    var rootFunc     = self.makeRootFunc(data,model,modelName,relationName,tx,accessToken);
+    var rootFunc     = self.makeRootFunc(data,model,modelName,relationName,relationType,parent_rel_data,tx,accessToken);
     var leafFuncs    = self.makeLeafFuncs(data,relationData,tx,accessToken);
     var master_funcs = self.makeMasterFunc(rootFunc,leafFuncs);
   }
   return master_funcs;
-
 }
 
 var createNestedInstance = new createNested();
